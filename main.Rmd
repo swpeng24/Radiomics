@@ -1,0 +1,162 @@
+---
+title: "Source code for Radiomics"
+author: "Shengwang Peng"
+contact: "swpeng24@163.com"
+date: "2022/8/31"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(gtsummary)
+library(ggplot2)
+library(rms)
+library(glmnet)
+library(MASS)
+library(pROC)
+library(plotROC)
+library(openxlsx)
+library(corrplot)
+library(nricens)
+library(PredictABEL)
+library(ROCR)
+library(rmda)
+library(caret)
+library(readxl)
+```
+
+```{r}
+data.tr <- read_excel("data.xlsx","train")
+data.tr <- na.omit(data.tr)
+# dddt <- datadist(data.tr)
+# options(datadist="dddt")
+```
+
+## Radiomics features selection
+# Note: label1 means ALK, and label2 means Ki-67
+```{r}
+from <- 1
+to <- 460
+dat2 <- data.frame(t1=as.character(1:370))
+TResults <- c() 
+for ( i in c(from:to)){ 
+  res <- t.test(data.train[[i]]~label1, data = data.train)
+  pvalue <- res[3][["p.value"]]
+  if(pvalue>0.05){
+    dat2[i]<- 0     
+  }           
+  else {
+    dat2[i]<- pvalue
+    TResults <- append(TResults,i)
+  }
+}
+TResults <- append(TResults,1)
+data.s <- data.train[,TResults]
+```
+
+```{r}
+dddt <- datadist(data.s)
+options(datadist="dddt")
+```
+
+```{r}
+set.seed(1)
+tmp_y <- data.s$label1
+tmp_x <- model.matrix(~.,data.s[,1:460]) 
+model_lasso <-  glmnet(tmp_x, tmp_y, family="binomial", nlambda=30, alpha=1, standardize=TRUE)
+plot(model_lasso,xvar="lambda",label=TRUE)
+
+# find the optimal model via cross-validation
+glm_cv <- cv.glmnet(tmp_x, tmp_y, family="binomial", nlambda=30, alpha=1, standardize=TRUE)
+plot(glm_cv)
+glm_cv$lambda.min
+coef(glm_cv, s=glm_cv$lambda.min) 
+```
+
+## Clinic variables selection
+```{r}
+data.tr$gender <- factor(data.tr$gender)
+data.tr$p_type <- factor(data.tr$p_type)
+data.tr$location <- factor(data.tr$location)
+data.tr$leision <- factor(data.tr$lesion)
+
+data.te$gender <- factor(data.te$gender)
+data.te$p_type <- factor(data.te$p_type)
+data.te$location <- factor(data.te$location)
+data.te$leision <- factor(data.te$lesion)
+
+xlist1 = c("gender","smoke","age","p_type","location","max_para","lesion")
+formula1 <- formula(paste(paste("label1","~", collapse=" "), 
+                         paste(xlist1, collapse=" + ")))
+model1 <- glm(formula1, data = data.tr, family = binomial('logit'), x=TRUE)
+summary(model1)$coefficients
+exp(cbind("OR"=coef(model1),confint(model1)))
+
+model1.both <- stepAIC(model1, direction = "both")
+summary(model1.both)$coefficients
+exp(cbind("OR"=coef(model1.both),confint(model1)))
+```
+
+## single task model construction and validation
+```{r}
+xlist1 = c("R1","age")
+formula1 <- formula(paste(paste("label1","~", collapse=" "), 
+                         paste(xlist1, collapse=" + ")))
+glm1 <- glm(formula1, data = data.tr, family = binomial('logit'), x=TRUE)
+summary(glm1)
+
+# AUC in training cohort
+data.tr$phat1 <- predict(glm1, newdata = data.tr, type="response")
+roc_tr_1 <- roc(data.tr$label1, data.tr$phat1)
+roc_tr_1$auc 
+ci.auc(roc_tr_1)
+#plot(roc_tr_1, print.auc=TRUE, auc.polygon=TRUE)
+plot(roc_tr_1,
+     legacy.axes = TRUE,
+     main="ROC curve",
+     thresholds="best",
+     print.thres="best",
+     print.auc=TRUE, 
+     auc.polygon=TRUE)
+
+data.te$phat1 <- predict(glm1, newdata = data.te, type="response")
+roc_te_1 <- roc(data.te$label1, data.te$phat1)
+roc_te_1$auc 
+ci.auc(roc_te_1)
+#plot(roc_te_1, print.auc=TRUE, auc.polygon=TRUE)
+plot(roc_te_1,
+     legacy.axes = TRUE,
+     main="ROC curve",
+     thresholds="best",
+     print.thres="best",
+     print.auc=TRUE, 
+     auc.polygon=TRUE)
+```
+
+## Dynamic nomogram
+```{r}
+DynNom(glm1, data.tr, 
+       #covariate = "numeric",
+       DNtitle = "Nomogram", DNxlab = "Probability")
+```
+
+## DCA curce
+```{r}
+DCA_model1_tr <- decision_curve(formula1, data = data.tr,
+                          family = binomial(link = 'logit'),
+                          thresholds = seq(0,1, by = 0.01),
+                          confidence.intervals = 0.95, study.design = 'case-control',
+                          population.prevalence= 0.3)
+
+plot_decision_curve(DCA_model1_tr, curve.names = c('Model1'), xlim = c(0,0.8),
+                    cost.benefit.axis = FALSE,
+                    col = c('red'),
+                    ylim = c(-0.05, 0.3),
+                    confidence.intervals = FALSE,
+                    standardize = FALSE)
+```
+
+
+
+
+
